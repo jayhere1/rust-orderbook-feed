@@ -1,0 +1,8 @@
+/target
+**/*.rs.bk
+
+# Local-only session notes, not part of the published project.
+HANDOFF.md
+
+# Local editor/agent settings.
+/.claude/

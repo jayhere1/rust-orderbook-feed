@@ -1,0 +1,28 @@
+[package]
+name = "orderbook-feed"
+version = "0.1.0"
+edition = "2021"
+description = "Live crypto exchange WebSocket client that consumes public order-book feeds (Binance / Coinbase) and maintains an in-memory order book from deltas."
+license = "MIT"
+
+[[bin]]
+name = "orderbook-feed"
+path = "src/main.rs"
+
+[dependencies]
+async-std = { version = "1", features = ["attributes"] }
+async-tungstenite = { version = "0.25", features = ["async-std-runtime", "async-tls"] }
+futures = "0.3"
+surf = { version = "2.3", default-features = false, features = ["h1-client-rustls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rust_decimal = "1"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+async-trait = "0.1"
+log = "0.4"
+env_logger = "0.11"
+
+[profile.release]
+lto = true
+codegen-units = 1
