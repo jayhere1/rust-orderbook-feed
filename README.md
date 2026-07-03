@@ -2,8 +2,8 @@
 
 A Rust WebSocket client that consumes a live crypto exchange feed (Binance or
 Coinbase public streams), parses order-book deltas, and maintains a correct
-in-memory order book with sequence/gap handling, automatic reconnect, and basic
-throughput metrics.
+in-memory order book with sequence/gap handling, automatic reconnect, and
+throughput + feed-latency metrics.
 
 Built on `async-std` + `async-tungstenite` (rustls TLS), `surf` for the REST
 snapshot, `serde` for JSON, and `rust_decimal` for exact price/quantity math.
@@ -36,11 +36,19 @@ Sample output (real, top-3 depth, Binance BTCUSDT):
 
 ```
 [binance] snapshot applied @ update id 96898756487 (4 buffered deltas to replay)
-[binance:BTCUSDT] bid 61757.99 x 1.66603 | ask 61758.00 x 1.43825 | spread 0.01 | book 1049/999 | 10 upd/s | 191 total
-    61757.99000000     1.66603000  |  61758.00000000 1.43825000
-    61757.98000000     0.00107000  |  61758.01000000 0.00089000
-    61757.97000000     0.00017000  |  61758.02000000 0.00017000
+[binance:BTCUSDT] bid 61966.14 x 0.49 | ask 61966.15 x 2.40 | spread 0.01 | book 1079/998 | 10 upd/s | lat 113/146 ms (avg/max) | 96 total
+    61966.14000000     0.49257000  |  61966.15000000 2.40323000
+    61966.13000000     0.00107000  |  61966.16000000 0.00089000
+    61966.12000000     0.00017000  |  61966.17000000 0.00017000
 ```
+
+`lat a/b ms (avg/max)` is the exchange-to-local latency of applied updates over
+the same 1-second window as `upd/s`: for each update, `local_receive_time −
+exchange_event_time` (`E` on Binance, `time` on Coinbase). It bundles network
+transit and any clock offset between the two machines, so without NTP-synced
+clocks the absolute value is indicative rather than exact — the **max** and how
+it moves are the useful signal. A feed that carries no event timestamp shows
+`lat --`.
 
 ## How the book stays correct
 
@@ -92,8 +100,6 @@ detection.
 
 Natural next steps, roughly in order of value:
 
-- **Latency metric** — compare the exchange event timestamp (`E` on Binance,
-  `time` on Coinbase) against local receive time.
 - **Checksum validation** — verify the maintained book against exchange-provided
   book checksums where offered.
 - **Multiple symbols per process** — Binance combined streams; several Coinbase

@@ -26,12 +26,15 @@ pub enum BookEvent {
     },
     /// Incremental update. `first`/`last` are the update-id range this delta
     /// spans (Binance uses U/u; Coinbase carries a single sequence, so
-    /// first == last there).
+    /// first == last there). `event_time_ms` is the exchange-stamped event time
+    /// in epoch milliseconds when the feed provides one (`None` otherwise); it
+    /// is used only for the latency metric, not for book correctness.
     Delta {
         bids: Vec<Level>,
         asks: Vec<Level>,
         first: u64,
         last: u64,
+        event_time_ms: Option<u64>,
     },
 }
 

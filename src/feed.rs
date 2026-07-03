@@ -94,7 +94,10 @@ async fn run_once(
         let frame = frame?;
         match frame {
             Message::Text(txt) => {
-                handle_frame(exchange, &txt, &mut book, metrics, print_depth)?;
+                // Stamp arrival before parsing so the latency figure reflects
+                // wire time, not our JSON work.
+                let recv_ms = now_ms();
+                handle_frame(exchange, &txt, &mut book, metrics, print_depth, recv_ms)?;
             }
             Message::Ping(payload) => {
                 // Keep the connection alive; split-free stream so send directly.
@@ -170,6 +173,7 @@ where
             asks,
             first,
             last,
+            ..
         } = ev
         {
             // Stale deltas (u <= lastUpdateId) are dropped inside apply_delta.
@@ -187,6 +191,7 @@ fn handle_frame(
     book: &mut OrderBook,
     metrics: &mut Metrics,
     print_depth: usize,
+    recv_ms: u64,
 ) -> Result<()> {
     let event = match exchange.parse_message(txt)? {
         Some(ev) => ev,
@@ -207,10 +212,16 @@ fn handle_frame(
             asks,
             first,
             last,
+            event_time_ms,
         } => {
             let n = bids.len() + asks.len();
             match book.apply_delta(&bids, &asks, first, last) {
-                Ok(true) => metrics.record_update(n),
+                Ok(true) => {
+                    // saturating: if the exchange clock reads ahead of ours the
+                    // difference is treated as zero rather than wrapping.
+                    let latency = event_time_ms.map(|e| recv_ms.saturating_sub(e));
+                    metrics.record_update(n, latency);
+                }
                 Ok(false) => {} // stale, ignored
                 Err(gap) => return Err(anyhow!("{gap}")),
             }
@@ -219,4 +230,13 @@ fn handle_frame(
 
     metrics.maybe_print(book, print_depth);
     Ok(())
+}
+
+/// Current wall-clock time in epoch milliseconds (best effort; 0 if the clock
+/// is before the Unix epoch, which cannot happen in practice).
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }

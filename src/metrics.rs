@@ -10,6 +10,7 @@ pub struct Metrics {
     total_levels: u64,
     window_updates: u64,
     window_start: Instant,
+    window_latency: Latency,
     last_print: Instant,
     print_every: Duration,
     healthy: bool,
@@ -25,17 +26,22 @@ impl Metrics {
             total_levels: 0,
             window_updates: 0,
             window_start: now,
+            window_latency: Latency::default(),
             last_print: now,
             print_every: Duration::from_secs(1),
             healthy: false,
         }
     }
 
-    /// Record an applied delta touching `levels` price points.
-    pub fn record_update(&mut self, levels: usize) {
+    /// Record an applied delta touching `levels` price points. `latency_ms` is
+    /// the event-to-receive latency when the feed carries an event timestamp.
+    pub fn record_update(&mut self, levels: usize, latency_ms: Option<u64>) {
         self.total_updates += 1;
         self.total_levels += levels as u64;
         self.window_updates += 1;
+        if let Some(l) = latency_ms {
+            self.window_latency.record(l);
+        }
     }
 
     /// Mark the session as having survived long enough to be considered healthy
@@ -71,9 +77,13 @@ impl Metrics {
             .spread()
             .map(|s| s.to_string())
             .unwrap_or_else(|| "--".into());
+        let lat = match self.window_latency.summary() {
+            Some((avg, max)) => format!("lat {avg}/{max} ms (avg/max)"),
+            None => "lat --".to_string(),
+        };
 
         println!(
-            "[{}:{}] bid {bid} | ask {ask} | spread {spread} | book {bid_levels}/{ask_levels} | {rate:.0} upd/s | {} total",
+            "[{}:{}] bid {bid} | ask {ask} | spread {spread} | book {bid_levels}/{ask_levels} | {rate:.0} upd/s | {lat} | {} total",
             self.exchange, self.symbol, self.total_updates
         );
 
@@ -96,5 +106,80 @@ impl Metrics {
         self.last_print = Instant::now();
         self.window_updates = 0;
         self.window_start = Instant::now();
+        self.window_latency.reset();
+    }
+}
+
+/// Rolling per-window latency aggregation: event-time (exchange) to
+/// receive-time (local). Tracks enough to report average and worst-case.
+#[derive(Default)]
+struct Latency {
+    sum_ms: u64,
+    count: u64,
+    max_ms: u64,
+}
+
+impl Latency {
+    fn record(&mut self, ms: u64) {
+        self.sum_ms += ms;
+        self.count += 1;
+        self.max_ms = self.max_ms.max(ms);
+    }
+
+    /// `(avg_ms, max_ms)` over the current window, or `None` if no samples
+    /// were recorded (e.g. a feed that carries no event timestamp).
+    fn summary(&self) -> Option<(u64, u64)> {
+        // checked_div yields None on an empty window (count == 0).
+        self.sum_ms
+            .checked_div(self.count)
+            .map(|avg| (avg, self.max_ms))
+    }
+
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn latency_empty_is_none() {
+        let l = Latency::default();
+        assert_eq!(l.summary(), None);
+    }
+
+    #[test]
+    fn latency_reports_avg_and_max() {
+        let mut l = Latency::default();
+        l.record(4);
+        l.record(6);
+        l.record(38);
+        // avg = (4 + 6 + 38) / 3 = 16, max = 38
+        assert_eq!(l.summary(), Some((16, 38)));
+    }
+
+    #[test]
+    fn latency_reset_clears_window() {
+        let mut l = Latency::default();
+        l.record(10);
+        l.reset();
+        assert_eq!(l.summary(), None);
+    }
+
+    #[test]
+    fn record_update_feeds_latency_window() {
+        let mut m = Metrics::new("binance", "BTCUSDT");
+        m.record_update(2, Some(10));
+        m.record_update(2, Some(20));
+        assert_eq!(m.window_latency.summary(), Some((15, 20)));
+    }
+
+    #[test]
+    fn record_update_without_timestamp_has_no_latency() {
+        let mut m = Metrics::new("binance", "BTCUSDT");
+        m.record_update(2, None);
+        assert_eq!(m.window_latency.summary(), None);
     }
 }

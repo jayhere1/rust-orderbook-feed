@@ -43,6 +43,8 @@ struct RestSnapshot {
 
 #[derive(Deserialize)]
 struct DepthEvent {
+    #[serde(rename = "E")]
+    event_time: u64,
     #[serde(rename = "U")]
     first_update_id: u64,
     #[serde(rename = "u")]
@@ -107,6 +109,34 @@ impl Exchange for Binance {
             asks: parse_levels(&ev.asks)?,
             first: ev.first_update_id,
             last: ev.final_update_id,
+            event_time_ms: Some(ev.event_time),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::orderbook::BookEvent;
+
+    #[test]
+    fn parse_extracts_range_and_event_time() {
+        let b = Binance::new("BTCUSDT");
+        let raw = r#"{"e":"depthUpdate","E":1719491696789,"s":"BTCUSDT","U":100,"u":105,"b":[["61000.00","1.5"]],"a":[["61001.00","2.0"]]}"#;
+        let ev = b.parse_message(raw).unwrap().expect("should parse a delta");
+        match ev {
+            BookEvent::Delta {
+                first,
+                last,
+                event_time_ms,
+                bids,
+                asks,
+            } => {
+                assert_eq!((first, last), (100, 105));
+                assert_eq!(event_time_ms, Some(1719491696789));
+                assert_eq!((bids.len(), asks.len()), (1, 1));
+            }
+            _ => panic!("expected a delta"),
+        }
     }
 }
