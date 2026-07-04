@@ -107,8 +107,10 @@ Using the wrong format for the chosen exchange is the most common startup error.
   that feed cannot be detected from the payload; gap detection is real only for
   Binance. (See §"How the book stays correct" in `README.md`.)
 - No persistence, no cross-run recovery, single symbol per process.
-- No checksum validation against exchange-provided book checksums (Coinbase
-  offers one on some channels; not used here).
+- No book-checksum validation. Neither implemented feed offers one: Binance spot
+  depth and Coinbase `level2_batch` are validated by sequence contiguity, not a
+  checksum. (Order-book CRC32 checksums exist on other venues — Kraken, OKX,
+  Bitfinex — and would come in with such an adapter.)
 
 ## 10. Verification status
 
@@ -117,8 +119,9 @@ Verified on macOS (Rust 1.95, edition 2021):
 - `cargo build` / `cargo build --release` — clean, no warnings.
 - `cargo clippy --all-targets` — clean.
 - `cargo fmt --check` — clean.
-- `cargo test` — 18/18 unit tests pass (order book, latency aggregation,
-  RFC3339 parsing, and per-exchange event-time extraction).
+- `cargo test` — 21/21 tests pass: unit tests (order book, latency aggregation,
+  RFC3339 parsing, per-exchange event-time extraction) plus replay integration
+  tests over recorded real sessions (see §11).
 - Live smoke test, Binance `BTCUSDT` — snapshot seeded (buffered deltas
   replayed), then steady ~10 upd/s with a 0.01 spread and ~1000/1000 book;
   latency ~`lat 113/146 ms`.
@@ -131,3 +134,17 @@ Notes:
   `Failed to subscribe` without it.
 - `level2_batch` was confirmed to carry the `time` field, so latency is reported
   for both feeds (not just Binance).
+
+## 11. Replay fixtures
+
+`src/replay.rs` replays small recorded real sessions in `tests/fixtures/` through
+the live parse + order-book code, so the snapshot/delta/gap path is covered
+offline (`cargo test`, no network).
+
+To refresh the fixtures, capture a *coherent* session — the Binance REST snapshot
+must be fetched mid-stream so its `lastUpdateId` lands inside the captured delta
+range (a straddling delta must exist), exactly as the live sync does. Buffer a
+few `@depth@100ms` deltas, fetch `/api/v3/depth?...&limit=50`, then buffer a few
+more, and save the raw frames. For Coinbase, subscribe `level2_batch`, keep the
+`snapshot` message (trimmed to the top ~40 levels/side to stay small) and a run
+of `l2update` frames.

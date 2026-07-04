@@ -5,6 +5,8 @@ mod exchanges;
 mod feed;
 mod metrics;
 mod orderbook;
+#[cfg(test)]
+mod replay;
 
 use crate::exchanges::{binance::Binance, coinbase::Coinbase};
 use crate::feed::Exchange;

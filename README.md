@@ -85,6 +85,8 @@ exponential backoff.
 | `src/metrics.rs` | throughput accounting and periodic top-of-book printing |
 | `src/exchanges/binance.rs` | Binance diff-depth + REST snapshot adapter |
 | `src/exchanges/coinbase.rs` | Coinbase `level2_batch` adapter |
+| `src/replay.rs` | replay integration tests over recorded real sessions |
+| `tests/fixtures/` | small recorded Binance/Coinbase sessions |
 
 ## Test
 
@@ -92,9 +94,17 @@ exponential backoff.
 cargo test
 ```
 
-Unit tests in `src/orderbook.rs` cover snapshot application, level
-update/removal, stale-delta dropping, overlapping-delta application, and gap
-detection.
+Two layers:
+
+- **Unit tests** (`src/orderbook.rs`, `src/metrics.rs`, the adapters) cover
+  snapshot application, level update/removal, stale-delta dropping,
+  overlapping-delta application, gap detection, latency aggregation, RFC3339
+  parsing, and per-exchange event-time extraction.
+- **Replay integration tests** (`src/replay.rs`) feed *recorded real* Binance and
+  Coinbase sessions (`tests/fixtures/`) back through the exact
+  `parse` + `apply_delta` machinery the live driver uses — asserting the book
+  stays contiguous on genuine data, that a deliberately dropped frame surfaces
+  as a `SequenceGap`, and that top-of-book ends uncrossed. No network, no flake.
 
 ## Roadmap
 
@@ -104,7 +114,5 @@ Natural next steps, roughly in order of value:
   book checksums where offered.
 - **Multiple symbols per process** — Binance combined streams; several Coinbase
   `product_ids` on one subscription.
-- **Recorded-feed integration test** — replay a captured session as a fixture so
-  the full sync/gap path is covered without a network dependency.
 - **Persistence / fan-out** — expose top-of-book over a local socket or persist
   it for downstream consumers.

@@ -31,6 +31,18 @@ impl Binance {
             stream_symbol,
         }
     }
+
+    /// Parse a REST depth snapshot body into a [`BookEvent::Snapshot`]. Split
+    /// out from [`Binance::fetch_snapshot`] so the parsing can be exercised
+    /// offline against a recorded fixture (see `src/replay.rs`).
+    pub(crate) fn parse_snapshot(raw: &str) -> Result<BookEvent> {
+        let snap: RestSnapshot = serde_json::from_str(raw)?;
+        Ok(BookEvent::Snapshot {
+            bids: parse_levels(&snap.bids)?,
+            asks: parse_levels(&snap.asks)?,
+            sequence: snap.last_update_id,
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -90,12 +102,8 @@ impl Exchange for Binance {
         if !res.status().is_success() {
             return Err(anyhow!("snapshot HTTP {}", res.status()));
         }
-        let snap: RestSnapshot = res.body_json().await.map_err(|e| anyhow!(e))?;
-        Ok(BookEvent::Snapshot {
-            bids: parse_levels(&snap.bids)?,
-            asks: parse_levels(&snap.asks)?,
-            sequence: snap.last_update_id,
-        })
+        let body = res.body_string().await.map_err(|e| anyhow!(e))?;
+        Self::parse_snapshot(&body)
     }
 
     fn parse_message(&self, raw: &str) -> Result<Option<BookEvent>> {
