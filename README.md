@@ -1,16 +1,17 @@
 # orderbook-feed
 
-A Rust WebSocket client that consumes a live crypto exchange feed (Binance or
-Coinbase public streams), parses order-book deltas, and maintains a correct
-in-memory order book with sequence/gap handling, automatic reconnect, and
-throughput + feed-latency metrics.
+A Rust WebSocket client that consumes a live crypto exchange feed (Binance,
+Coinbase, or Kraken public streams), parses order-book deltas, and maintains a
+correct in-memory order book with sequence/gap handling, CRC32 checksum
+validation (Kraken), automatic reconnect, and throughput + feed-latency metrics.
 
 Built on `async-std` + `async-tungstenite` (rustls TLS), `surf` for the REST
 snapshot, `serde` for JSON, and `rust_decimal` for exact price/quantity math.
 
-Verified against both live feeds (see [`RUNBOOK.md`](RUNBOOK.md) §10): `cargo
-test` is green, and both adapters seed a snapshot and hold a correct book under a
-steady delta stream.
+Verified against all three live feeds (see [`RUNBOOK.md`](RUNBOOK.md) §10): `cargo
+test` is green, and each adapter seeds a snapshot and holds a correct book under a
+steady delta stream — with Kraken's per-update checksum matching ours on live
+data.
 
 ## Run
 
@@ -21,6 +22,9 @@ cargo run --release
 # Coinbase BTC-USD
 cargo run --release -- --exchange coinbase --symbol BTC-USD
 
+# Kraken BTC/USD (checksum-validated depth-10 book)
+cargo run --release -- --exchange kraken --symbol BTC/USD
+
 # Ethereum on Binance, top-of-book only
 cargo run --release -- --exchange binance --symbol ETHUSDT --depth 1
 
@@ -28,9 +32,9 @@ cargo run --release -- --exchange binance --symbol ETHUSDT --depth 1
 RUST_LOG=debug cargo run
 ```
 
-CLI flags: `--exchange {binance|coinbase}`, `--symbol <SYMBOL>`,
+CLI flags: `--exchange {binance|coinbase|kraken}`, `--symbol <SYMBOL>`,
 `--depth <N>` (book levels printed per tick). Defaults: Binance / `BTCUSDT` /
-depth 5. Coinbase's default symbol is `BTC-USD`.
+depth 5. Default symbols: `BTC-USD` (coinbase), `BTC/USD` (kraken).
 
 Sample output (real, top-3 depth, Binance BTCUSDT):
 
@@ -68,6 +72,19 @@ replies `Failed to subscribe` without it — same message shapes, just batched t
 monotonic counter (reset on each snapshot) keeps updates contiguous for the
 shared book machinery.
 
+**Kraken** (`src/exchanges/kraken.rs`) subscribes to the v2 `book` channel
+(`depth=10`) plus the `instrument` channel (for the symbol's price/qty
+precision) on `wss://ws.kraken.com/v2`. Kraken's book has no sequence number —
+instead every message carries a **CRC32 `checksum`** over the top-10 of each
+side, and that is the integrity mechanism. After applying each update (and
+truncating back to depth 10 — Kraken doesn't send removals for levels leaving
+the top-10), the driver recomputes the checksum from the maintained book and
+compares; a mismatch is treated exactly like a gap → drop and resync. The CRC32
+and the exact string construction (price then qty per level, formatted to
+precision, decimal removed, leading zeros stripped) live in `src/checksum.rs`
+and `src/exchanges/kraken.rs`, and are tested byte-for-byte against a recorded
+real Kraken session.
+
 The contiguity/gap logic itself lives once in
 `OrderBook::apply_delta` (`src/orderbook.rs`): it applies overlapping deltas,
 silently drops stale ones, and returns a `SequenceGap` when a message was
@@ -85,8 +102,10 @@ exponential backoff.
 | `src/metrics.rs` | throughput accounting and periodic top-of-book printing |
 | `src/exchanges/binance.rs` | Binance diff-depth + REST snapshot adapter |
 | `src/exchanges/coinbase.rs` | Coinbase `level2_batch` adapter |
+| `src/exchanges/kraken.rs` | Kraken v2 `book` adapter + checksum verification |
+| `src/checksum.rs` | zero-dependency CRC32 (IEEE) |
 | `src/replay.rs` | replay integration tests over recorded real sessions |
-| `tests/fixtures/` | small recorded Binance/Coinbase sessions |
+| `tests/fixtures/` | small recorded Binance/Coinbase/Kraken sessions |
 
 ## Test
 
@@ -105,14 +124,18 @@ Two layers:
   `parse` + `apply_delta` machinery the live driver uses — asserting the book
   stays contiguous on genuine data, that a deliberately dropped frame surfaces
   as a `SequenceGap`, and that top-of-book ends uncrossed. No network, no flake.
+- **Checksum tests** (`src/exchanges/kraken.rs`) rebuild the book from a recorded
+  real Kraken session and assert our computed CRC32 matches Kraken's on the
+  snapshot and every update (plus the CRC32 standard check vector).
 
 ## Roadmap
 
 Natural next steps, roughly in order of value:
 
-- **Checksum validation** — verify the maintained book against exchange-provided
-  book checksums where offered.
 - **Multiple symbols per process** — Binance combined streams; several Coinbase
-  `product_ids` on one subscription.
+  `product_ids` / Kraken symbols on one subscription.
+- **Kraken feed latency** — extract the `timestamp` on Kraken `book` updates for
+  the latency metric (currently shows `lat --`); the RFC3339 parser already
+  exists in the Coinbase adapter and would move to a shared helper.
 - **Persistence / fan-out** — expose top-of-book over a local socket or persist
   it for downstream consumers.

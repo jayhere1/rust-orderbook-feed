@@ -2,6 +2,7 @@
 
 pub mod binance;
 pub mod coinbase;
+pub mod kraken;
 
 use crate::orderbook::Level;
 use anyhow::{Context, Result};

@@ -144,6 +144,7 @@ impl Exchange for Coinbase {
                     first: n,
                     last: n,
                     event_time_ms,
+                    checksum: None,
                 }))
             }
             Incoming::Error { message } => {

@@ -1,6 +1,7 @@
 //! orderbook-feed: connect to a public crypto exchange WebSocket feed,
 //! parse order-book deltas, and maintain a live in-memory order book.
 
+mod checksum;
 mod exchanges;
 mod feed;
 mod metrics;
@@ -8,7 +9,7 @@ mod orderbook;
 #[cfg(test)]
 mod replay;
 
-use crate::exchanges::{binance::Binance, coinbase::Coinbase};
+use crate::exchanges::{binance::Binance, coinbase::Coinbase, kraken::Kraken};
 use crate::feed::Exchange;
 use anyhow::Result;
 use clap::{Parser, ValueEnum};
@@ -17,9 +18,10 @@ use clap::{Parser, ValueEnum};
 enum ExchangeArg {
     Binance,
     Coinbase,
+    Kraken,
 }
 
-/// Live order-book client for Binance / Coinbase public feeds.
+/// Live order-book client for Binance / Coinbase / Kraken public feeds.
 #[derive(Parser, Debug)]
 #[command(name = "orderbook-feed", version, about)]
 struct Args {
@@ -27,7 +29,8 @@ struct Args {
     #[arg(short, long, value_enum, default_value_t = ExchangeArg::Binance)]
     exchange: ExchangeArg,
 
-    /// Market symbol. Defaults: BTCUSDT (binance), BTC-USD (coinbase).
+    /// Market symbol. Defaults: BTCUSDT (binance), BTC-USD (coinbase),
+    /// BTC/USD (kraken).
     #[arg(short, long)]
     symbol: Option<String>,
 
@@ -41,6 +44,7 @@ impl ExchangeArg {
         match self {
             ExchangeArg::Binance => "BTCUSDT",
             ExchangeArg::Coinbase => "BTC-USD",
+            ExchangeArg::Kraken => "BTC/USD",
         }
     }
 }
@@ -58,6 +62,7 @@ async fn main() -> Result<()> {
     let exchange: Box<dyn Exchange> = match args.exchange {
         ExchangeArg::Binance => Box::new(Binance::new(&symbol)),
         ExchangeArg::Coinbase => Box::new(Coinbase::new(&symbol)),
+        ExchangeArg::Kraken => Box::new(Kraken::new(&symbol)),
     };
 
     log::info!(

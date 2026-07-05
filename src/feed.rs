@@ -39,6 +39,21 @@ pub trait Exchange: Send + Sync {
     /// Parse one raw text frame into a book event, or `None` to ignore it
     /// (control messages, subscription acks, heartbeats, ...).
     fn parse_message(&self, raw: &str) -> Result<Option<BookEvent>>;
+
+    /// If the feed maintains only a fixed depth (e.g. Kraken `book` `depth=10`),
+    /// the number of levels to keep per side after each update. The driver
+    /// truncates the book to this depth. `None` means keep the full book.
+    fn book_depth_limit(&self) -> Option<usize> {
+        None
+    }
+
+    /// Validate the maintained `book` against an exchange-provided `checksum`.
+    /// Called after an update that carried one; an `Err` is treated like a
+    /// sequence gap (drop the book and resync). Default is a no-op for feeds
+    /// that don't provide checksums.
+    fn verify_checksum(&self, _book: &OrderBook, _checksum: u32) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Run the feed forever, reconnecting with capped exponential backoff.
@@ -205,6 +220,9 @@ fn handle_frame(
             sequence,
         } => {
             book.apply_snapshot(&bids, &asks, sequence);
+            if let Some(limit) = exchange.book_depth_limit() {
+                book.retain_top(limit);
+            }
             log::info!("[{}] snapshot applied @ {sequence}", exchange.name());
         }
         BookEvent::Delta {
@@ -213,14 +231,25 @@ fn handle_frame(
             first,
             last,
             event_time_ms,
+            checksum,
         } => {
             let n = bids.len() + asks.len();
             match book.apply_delta(&bids, &asks, first, last) {
                 Ok(true) => {
+                    // Depth-limited feeds don't send removals for levels leaving
+                    // the top-N, so truncate before validating the checksum.
+                    if let Some(limit) = exchange.book_depth_limit() {
+                        book.retain_top(limit);
+                    }
                     // saturating: if the exchange clock reads ahead of ours the
                     // difference is treated as zero rather than wrapping.
                     let latency = event_time_ms.map(|e| recv_ms.saturating_sub(e));
                     metrics.record_update(n, latency);
+                    // A checksum mismatch means our book diverged; surface it as
+                    // an error so the driver resyncs, exactly like a gap.
+                    if let Some(cksum) = checksum {
+                        exchange.verify_checksum(book, cksum)?;
+                    }
                 }
                 Ok(false) => {} // stale, ignored
                 Err(gap) => return Err(anyhow!("{gap}")),

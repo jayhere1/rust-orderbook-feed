@@ -118,6 +118,7 @@ impl Exchange for Binance {
             first: ev.first_update_id,
             last: ev.final_update_id,
             event_time_ms: Some(ev.event_time),
+            checksum: None,
         }))
     }
 }
@@ -139,6 +140,7 @@ mod tests {
                 event_time_ms,
                 bids,
                 asks,
+                ..
             } => {
                 assert_eq!((first, last), (100, 105));
                 assert_eq!(event_time_ms, Some(1719491696789));

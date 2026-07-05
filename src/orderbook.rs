@@ -35,6 +35,10 @@ pub enum BookEvent {
         first: u64,
         last: u64,
         event_time_ms: Option<u64>,
+        /// Exchange-provided CRC32 of the top-of-book after this update, when the
+        /// feed offers one (Kraken). Verified against the maintained book; a
+        /// mismatch triggers a resync. `None` for feeds without a checksum.
+        checksum: Option<u32>,
     },
 }
 
@@ -176,6 +180,21 @@ impl OrderBook {
     pub fn depth(&self) -> (usize, usize) {
         (self.bids.len(), self.asks.len())
     }
+
+    /// Drop all but the best `n` levels on each side (highest `n` bids, lowest
+    /// `n` asks). Used by depth-limited feeds (e.g. Kraken `book` `depth=10`),
+    /// which apply updates and then truncate — they don't send removals for
+    /// levels that fall out of the subscribed depth.
+    pub fn retain_top(&mut self, n: usize) {
+        while self.bids.len() > n {
+            let worst = *self.bids.keys().next().expect("non-empty");
+            self.bids.remove(&worst);
+        }
+        while self.asks.len() > n {
+            let worst = *self.asks.keys().next_back().expect("non-empty");
+            self.asks.remove(&worst);
+        }
+    }
 }
 
 /// Insert/update a level, or remove it when quantity is zero.
@@ -269,5 +288,20 @@ mod tests {
     fn delta_before_init_errors() {
         let mut b = OrderBook::new();
         assert!(b.apply_delta(&[lvl("100", "1")], &[], 1, 1).is_err());
+    }
+
+    #[test]
+    fn retain_top_keeps_only_best_levels() {
+        let mut b = OrderBook::new();
+        b.apply_snapshot(
+            &[lvl("100", "1"), lvl("99", "2"), lvl("98", "3")],
+            &[lvl("101", "1"), lvl("102", "2"), lvl("103", "3")],
+            1,
+        );
+        b.retain_top(2);
+        assert_eq!(b.depth(), (2, 2));
+        // best levels kept, worst (98 bid / 103 ask) dropped
+        assert_eq!(b.top_bids(5), vec![(d("100"), d("1")), (d("99"), d("2"))]);
+        assert_eq!(b.top_asks(5), vec![(d("101"), d("1")), (d("102"), d("2"))]);
     }
 }
