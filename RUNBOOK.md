@@ -117,9 +117,6 @@ Using the wrong format for the chosen exchange is the most common startup error.
   via update-id contiguity, Kraken via the CRC32 checksum, Coinbase best-effort
   (synthetic counter only). (See §"How the book stays correct" in `README.md`.)
 - No persistence, no cross-run recovery, single symbol per process.
-- Kraken `book` updates carry a `timestamp`, but it is not yet wired into the
-  latency metric, so Kraken shows `lat --`. (Binance `E` and Coinbase `time`
-  are.)
 
 ## 10. Verification status
 
@@ -128,7 +125,7 @@ Verified on macOS (Rust 1.95, edition 2021):
 - `cargo build` / `cargo build --release` — clean, no warnings.
 - `cargo clippy --all-targets` — clean.
 - `cargo fmt --check` — clean.
-- `cargo test` — 27/27 tests pass: unit tests (order book, latency aggregation,
+- `cargo test` — 28/28 tests pass: unit tests (order book, latency aggregation,
   RFC3339 parsing, per-exchange event-time extraction, CRC32, Kraken checksum)
   plus replay + checksum integration tests over recorded real sessions (see §11).
 - Live smoke test, Binance `BTCUSDT` — snapshot seeded (buffered deltas
@@ -136,16 +133,17 @@ Verified on macOS (Rust 1.95, edition 2021):
   latency ~`lat 113/146 ms`.
 - Live smoke test, Coinbase `BTC-USD` — snapshot seeded, then steady ~17 upd/s
   over the full book (~14k/28k levels); latency ~`lat 53/113 ms`.
-- Live smoke test, Kraken `BTC/USD` — snapshot seeded, then steady ~5 upd/s at a
-  fixed 10/10 book; **63 updates with 0 checksum mismatches / 0 resyncs** (our
-  CRC32 matched Kraken's on every live update).
+- Live smoke test, Kraken `BTC/USD` — snapshot seeded, then a steady stream at a
+  fixed 10/10 book with **0 checksum mismatches / 0 resyncs** (our CRC32 matched
+  Kraken's on every live update); latency ~`lat 14/62 ms` from the update
+  `timestamp`.
 
 Notes:
 - The Coinbase adapter subscribes to `level2_batch` (the public, no-auth depth
   channel). The plain `level2` channel now requires authentication and returns
   `Failed to subscribe` without it.
-- `level2_batch` was confirmed to carry the `time` field, so latency is reported
-  for both Binance and Coinbase.
+- All three feeds carry an event timestamp (Binance `E`, Coinbase `time`, Kraken
+  `timestamp`), so latency is reported for all of them.
 - Kraken's book has no sequence number; the CRC32 `checksum` is its integrity
   mechanism, verified after every update (mismatch → resync).
 

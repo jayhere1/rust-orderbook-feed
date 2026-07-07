@@ -48,7 +48,8 @@ Sample output (real, top-3 depth, Binance BTCUSDT):
 
 `lat a/b ms (avg/max)` is the exchange-to-local latency of applied updates over
 the same 1-second window as `upd/s`: for each update, `local_receive_time −
-exchange_event_time` (`E` on Binance, `time` on Coinbase). It bundles network
+exchange_event_time` (`E` on Binance, `time` on Coinbase, `timestamp` on
+Kraken). It bundles network
 transit and any clock offset between the two machines, so without NTP-synced
 clocks the absolute value is indicative rather than exact — the **max** and how
 it moves are the useful signal. A feed that carries no event timestamp shows
@@ -134,8 +135,5 @@ Natural next steps, roughly in order of value:
 
 - **Multiple symbols per process** — Binance combined streams; several Coinbase
   `product_ids` / Kraken symbols on one subscription.
-- **Kraken feed latency** — extract the `timestamp` on Kraken `book` updates for
-  the latency metric (currently shows `lat --`); the RFC3339 parser already
-  exists in the Coinbase adapter and would move to a shared helper.
 - **Persistence / fan-out** — expose top-of-book over a local socket or persist
   it for downstream consumers.

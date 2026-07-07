@@ -18,6 +18,7 @@
 //! formatted to the symbol's precision with the decimal point removed and
 //! leading zeros stripped.
 
+use super::rfc3339_to_epoch_ms;
 use crate::checksum::crc32;
 use crate::feed::Exchange;
 use crate::orderbook::{BookEvent, Level, OrderBook};
@@ -69,6 +70,9 @@ struct BookData {
     #[serde(default)]
     asks: Vec<KLevel>,
     checksum: u32,
+    /// Exchange event time (RFC3339); present on `book` updates.
+    #[serde(default)]
+    timestamp: Option<String>,
 }
 
 /// Price and qty arrive as JSON numbers; kept as `serde_json::Number` so they
@@ -200,7 +204,7 @@ impl Exchange for Kraken {
                             asks,
                             first: n,
                             last: n,
-                            event_time_ms: None,
+                            event_time_ms: data.timestamp.as_deref().and_then(rfc3339_to_epoch_ms),
                             checksum: Some(data.checksum),
                         }))
                     }
@@ -251,6 +255,24 @@ mod tests {
 
     const INSTRUMENT: &str = include_str!("../../tests/fixtures/kraken_btcusd_instrument.json");
     const BOOK: &str = include_str!("../../tests/fixtures/kraken_btcusd_book.jsonl");
+
+    #[test]
+    fn update_extracts_event_time_from_timestamp() {
+        let kraken = Kraken::new("BTC/USD");
+        let raw = r#"{"channel":"book","type":"update","data":[{"symbol":"BTC/USD","bids":[],"asks":[{"price":62623.4,"qty":0.07892262}],"checksum":643939250,"timestamp":"2019-08-14T20:42:27.265Z"}]}"#;
+        let ev = kraken.parse_message(raw).unwrap().expect("update parses");
+        match ev {
+            BookEvent::Delta {
+                event_time_ms,
+                checksum,
+                ..
+            } => {
+                assert_eq!(event_time_ms, Some(1565815347265));
+                assert_eq!(checksum, Some(643939250));
+            }
+            _ => panic!("expected a delta"),
+        }
+    }
 
     #[test]
     fn token_strips_decimal_and_leading_zeros() {
