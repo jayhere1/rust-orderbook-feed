@@ -20,32 +20,46 @@
 
 use super::rfc3339_to_epoch_ms;
 use crate::checksum::crc32;
-use crate::feed::Exchange;
+use crate::feed::{Exchange, ParsedEvent};
 use crate::orderbook::{BookEvent, Level, OrderBook};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 pub struct Kraken {
-    /// Pair id, e.g. "BTC/USD".
-    symbol: String,
-    /// Synthetic monotonic sequence, reset to 0 on each snapshot.
-    seq: AtomicU64,
-    /// `(price_precision, qty_precision)` learned from the `instrument` channel.
-    precision: Mutex<Option<(u32, u32)>>,
+    /// Pair ids, e.g. "BTC/USD".
+    symbols: Vec<String>,
+    /// Per-symbol synthetic monotonic sequence, reset to 0 on that symbol's
+    /// snapshot (Kraken's book carries no sequence number).
+    seq: Mutex<HashMap<String, u64>>,
+    /// Per-symbol `(price_precision, qty_precision)` learned from the
+    /// `instrument` channel; needed to reconstruct the exact checksum string.
+    precision: Mutex<HashMap<String, (u32, u32)>>,
 }
 
 impl Kraken {
-    pub fn new(symbol: &str) -> Self {
+    pub fn new<S: AsRef<str>>(symbols: &[S]) -> Self {
         Self {
-            symbol: symbol.to_uppercase(),
-            seq: AtomicU64::new(0),
-            precision: Mutex::new(None),
+            symbols: symbols.iter().map(|s| s.as_ref().to_uppercase()).collect(),
+            seq: Mutex::new(HashMap::new()),
+            precision: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Next synthetic sequence for `symbol`; `reset` restarts it at 0 (snapshot).
+    fn next_seq(&self, symbol: &str, reset: bool) -> u64 {
+        let mut seqs = self.seq.lock().unwrap();
+        let entry = seqs.entry(symbol.to_string()).or_insert(0);
+        if reset {
+            *entry = 0;
+        } else {
+            *entry += 1;
+        }
+        *entry
     }
 }
 
@@ -65,6 +79,7 @@ struct BookWrap {
 
 #[derive(Deserialize)]
 struct BookData {
+    symbol: String,
     #[serde(default)]
     bids: Vec<KLevel>,
     #[serde(default)]
@@ -133,8 +148,8 @@ impl Exchange for Kraken {
         "kraken"
     }
 
-    fn symbol(&self) -> &str {
-        &self.symbol
+    fn symbols(&self) -> &[String] {
+        &self.symbols
     }
 
     fn ws_url(&self) -> String {
@@ -148,7 +163,7 @@ impl Exchange for Kraken {
         });
         let book = serde_json::json!({
             "method": "subscribe",
-            "params": { "channel": "book", "symbol": [self.symbol], "depth": 10 }
+            "params": { "channel": "book", "symbol": self.symbols, "depth": 10 }
         });
         vec![instrument.to_string(), book.to_string()]
     }
@@ -161,7 +176,7 @@ impl Exchange for Kraken {
         Err(anyhow!("kraken snapshot arrives over the websocket"))
     }
 
-    fn parse_message(&self, raw: &str) -> Result<Option<BookEvent>> {
+    fn parse_message(&self, raw: &str) -> Result<Option<ParsedEvent>> {
         let env: Envelope = match serde_json::from_str(raw) {
             Ok(e) => e,
             Err(_) => return Ok(None),
@@ -169,14 +184,11 @@ impl Exchange for Kraken {
         match env.channel.as_deref() {
             Some("instrument") => {
                 if let Ok(wrap) = serde_json::from_str::<InstrumentWrap>(raw) {
-                    if let Some(p) = wrap
-                        .data
-                        .pairs
-                        .into_iter()
-                        .find(|p| p.symbol == self.symbol)
-                    {
-                        *self.precision.lock().unwrap() =
-                            Some((p.price_precision, p.qty_precision));
+                    let mut precision = self.precision.lock().unwrap();
+                    for p in wrap.data.pairs {
+                        if self.symbols.contains(&p.symbol) {
+                            precision.insert(p.symbol, (p.price_precision, p.qty_precision));
+                        }
                     }
                 }
                 Ok(None)
@@ -186,26 +198,36 @@ impl Exchange for Kraken {
                 let Some(data) = wrap.data.into_iter().next() else {
                     return Ok(None);
                 };
+                let symbol = data.symbol;
                 let bids = to_levels(&data.bids)?;
                 let asks = to_levels(&data.asks)?;
                 match env.kind.as_deref() {
                     Some("snapshot") => {
-                        self.seq.store(0, Ordering::SeqCst);
-                        Ok(Some(BookEvent::Snapshot {
-                            bids,
-                            asks,
-                            sequence: 0,
+                        self.next_seq(&symbol, true);
+                        Ok(Some(ParsedEvent {
+                            symbol,
+                            event: BookEvent::Snapshot {
+                                bids,
+                                asks,
+                                sequence: 0,
+                            },
                         }))
                     }
                     Some("update") => {
-                        let n = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
-                        Ok(Some(BookEvent::Delta {
-                            bids,
-                            asks,
-                            first: n,
-                            last: n,
-                            event_time_ms: data.timestamp.as_deref().and_then(rfc3339_to_epoch_ms),
-                            checksum: Some(data.checksum),
+                        let n = self.next_seq(&symbol, false);
+                        Ok(Some(ParsedEvent {
+                            symbol,
+                            event: BookEvent::Delta {
+                                bids,
+                                asks,
+                                first: n,
+                                last: n,
+                                event_time_ms: data
+                                    .timestamp
+                                    .as_deref()
+                                    .and_then(rfc3339_to_epoch_ms),
+                                checksum: Some(data.checksum),
+                            },
                         }))
                     }
                     _ => Ok(None),
@@ -219,8 +241,9 @@ impl Exchange for Kraken {
         Some(10)
     }
 
-    fn verify_checksum(&self, book: &OrderBook, checksum: u32) -> Result<()> {
-        let Some((price_prec, qty_prec)) = *self.precision.lock().unwrap() else {
+    fn verify_checksum(&self, symbol: &str, book: &OrderBook, checksum: u32) -> Result<()> {
+        let Some((price_prec, qty_prec)) = self.precision.lock().unwrap().get(symbol).copied()
+        else {
             // Precision not learned yet (instrument message not seen); can't
             // verify, so don't force a spurious resync.
             return Ok(());
@@ -257,11 +280,12 @@ mod tests {
     const BOOK: &str = include_str!("../../tests/fixtures/kraken_btcusd_book.jsonl");
 
     #[test]
-    fn update_extracts_event_time_from_timestamp() {
-        let kraken = Kraken::new("BTC/USD");
+    fn update_extracts_event_time_and_symbol() {
+        let kraken = Kraken::new(&["BTC/USD"]);
         let raw = r#"{"channel":"book","type":"update","data":[{"symbol":"BTC/USD","bids":[],"asks":[{"price":62623.4,"qty":0.07892262}],"checksum":643939250,"timestamp":"2019-08-14T20:42:27.265Z"}]}"#;
-        let ev = kraken.parse_message(raw).unwrap().expect("update parses");
-        match ev {
+        let parsed = kraken.parse_message(raw).unwrap().expect("update parses");
+        assert_eq!(parsed.symbol, "BTC/USD");
+        match parsed.event {
             BookEvent::Delta {
                 event_time_ms,
                 checksum,
@@ -288,7 +312,7 @@ mod tests {
         assert!(kraken.parse_message(INSTRUMENT.trim()).unwrap().is_none());
         let snap_line = BOOK.lines().next().unwrap();
         let mut book = OrderBook::new();
-        match kraken.parse_message(snap_line).unwrap().unwrap() {
+        match kraken.parse_message(snap_line).unwrap().unwrap().event {
             BookEvent::Snapshot {
                 bids,
                 asks,
@@ -302,26 +326,27 @@ mod tests {
 
     #[test]
     fn snapshot_checksum_matches_and_wrong_one_is_rejected() {
-        let kraken = Kraken::new("BTC/USD");
+        let kraken = Kraken::new(&["BTC/USD"]);
         let book = seed_from_snapshot(&kraken);
         // The real checksum from the captured snapshot.
-        assert!(kraken.verify_checksum(&book, 814493173).is_ok());
-        assert!(kraken.verify_checksum(&book, 12345).is_err());
+        assert!(kraken.verify_checksum("BTC/USD", &book, 814493173).is_ok());
+        assert!(kraken.verify_checksum("BTC/USD", &book, 12345).is_err());
     }
 
     #[test]
     fn recorded_session_checksums_match_kraken() {
-        let kraken = Kraken::new("BTC/USD");
+        let kraken = Kraken::new(&["BTC/USD"]);
         assert!(kraken.parse_message(INSTRUMENT.trim()).unwrap().is_none());
 
         let mut book = OrderBook::new();
         let mut verified = 0usize;
         for line in BOOK.lines().filter(|l| !l.trim().is_empty()) {
-            match kraken
+            let parsed = kraken
                 .parse_message(line)
                 .unwrap()
-                .expect("book message parses")
-            {
+                .expect("book message parses");
+            let symbol = parsed.symbol.clone();
+            match parsed.event {
                 BookEvent::Snapshot {
                     bids,
                     asks,
@@ -342,7 +367,7 @@ mod tests {
                     book.retain_top(10);
                     let cksum = checksum.expect("kraken update carries a checksum");
                     kraken
-                        .verify_checksum(&book, cksum)
+                        .verify_checksum(&symbol, &book, cksum)
                         .expect("our checksum must match kraken's on real data");
                     verified += 1;
                 }

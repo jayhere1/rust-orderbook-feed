@@ -13,7 +13,6 @@ pub struct Metrics {
     window_latency: Latency,
     last_print: Instant,
     print_every: Duration,
-    healthy: bool,
 }
 
 impl Metrics {
@@ -29,7 +28,6 @@ impl Metrics {
             window_latency: Latency::default(),
             last_print: now,
             print_every: Duration::from_secs(1),
-            healthy: false,
         }
     }
 
@@ -42,18 +40,6 @@ impl Metrics {
         if let Some(l) = latency_ms {
             self.window_latency.record(l);
         }
-    }
-
-    /// Mark the session as having survived long enough to be considered healthy
-    /// (used to reset reconnect backoff).
-    pub fn mark_healthy(&mut self) {
-        self.healthy = true;
-    }
-
-    pub fn session_was_healthy(&mut self) -> bool {
-        let was = self.healthy;
-        self.healthy = false;
-        was
     }
 
     /// Print a one-line snapshot at most once per `print_every`.

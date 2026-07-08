@@ -9,7 +9,7 @@
 //! contiguity check lives in [`crate::orderbook::OrderBook::apply_delta`].
 
 use super::parse_levels;
-use crate::feed::Exchange;
+use crate::feed::{Exchange, ParsedEvent};
 use crate::orderbook::BookEvent;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -20,13 +20,18 @@ pub struct Binance {
     symbol: String,
     /// Lower-case symbol for the stream path, e.g. "btcusdt".
     stream_symbol: String,
+    /// The single symbol as a slice, for the [`Exchange::symbols`] API.
+    symbols: Vec<String>,
 }
 
 impl Binance {
-    pub fn new(symbol: &str) -> Self {
-        let symbol = symbol.to_uppercase();
+    /// Single-symbol only for now; the driver rejects more than one before
+    /// constructing (combined streams are a follow-up).
+    pub fn new<S: AsRef<str>>(symbols: &[S]) -> Self {
+        let symbol = symbols[0].as_ref().to_uppercase();
         let stream_symbol = symbol.to_lowercase();
         Self {
+            symbols: vec![symbol.clone()],
             symbol,
             stream_symbol,
         }
@@ -73,8 +78,8 @@ impl Exchange for Binance {
         "binance"
     }
 
-    fn symbol(&self) -> &str {
-        &self.symbol
+    fn symbols(&self) -> &[String] {
+        &self.symbols
     }
 
     fn ws_url(&self) -> String {
@@ -106,19 +111,22 @@ impl Exchange for Binance {
         Self::parse_snapshot(&body)
     }
 
-    fn parse_message(&self, raw: &str) -> Result<Option<BookEvent>> {
+    fn parse_message(&self, raw: &str) -> Result<Option<ParsedEvent>> {
         // Only depth-update frames carry U/u; anything else is ignored.
         let ev: DepthEvent = match serde_json::from_str(raw) {
             Ok(ev) => ev,
             Err(_) => return Ok(None),
         };
-        Ok(Some(BookEvent::Delta {
-            bids: parse_levels(&ev.bids)?,
-            asks: parse_levels(&ev.asks)?,
-            first: ev.first_update_id,
-            last: ev.final_update_id,
-            event_time_ms: Some(ev.event_time),
-            checksum: None,
+        Ok(Some(ParsedEvent {
+            symbol: self.symbol.clone(),
+            event: BookEvent::Delta {
+                bids: parse_levels(&ev.bids)?,
+                asks: parse_levels(&ev.asks)?,
+                first: ev.first_update_id,
+                last: ev.final_update_id,
+                event_time_ms: Some(ev.event_time),
+                checksum: None,
+            },
         }))
     }
 }
@@ -130,10 +138,11 @@ mod tests {
 
     #[test]
     fn parse_extracts_range_and_event_time() {
-        let b = Binance::new("BTCUSDT");
+        let b = Binance::new(&["BTCUSDT"]);
         let raw = r#"{"e":"depthUpdate","E":1719491696789,"s":"BTCUSDT","U":100,"u":105,"b":[["61000.00","1.5"]],"a":[["61001.00","2.0"]]}"#;
-        let ev = b.parse_message(raw).unwrap().expect("should parse a delta");
-        match ev {
+        let parsed = b.parse_message(raw).unwrap().expect("should parse a delta");
+        assert_eq!(parsed.symbol, "BTCUSDT");
+        match parsed.event {
             BookEvent::Delta {
                 first,
                 last,

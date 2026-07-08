@@ -13,29 +13,43 @@
 //! metric.
 
 use super::{parse_levels, rfc3339_to_epoch_ms};
-use crate::feed::Exchange;
+use crate::feed::{Exchange, ParsedEvent};
 use crate::orderbook::{BookEvent, Level};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 pub struct Coinbase {
-    /// Product id, e.g. "BTC-USD".
-    symbol: String,
-    /// Synthetic monotonic sequence, reset to 0 on each snapshot.
-    seq: AtomicU64,
+    /// Product ids, e.g. "BTC-USD".
+    symbols: Vec<String>,
+    /// Per-symbol synthetic monotonic sequence, reset to 0 on that symbol's
+    /// snapshot. The channel carries no sequence, so we manufacture one per book.
+    seq: Mutex<HashMap<String, u64>>,
 }
 
 impl Coinbase {
-    pub fn new(symbol: &str) -> Self {
+    pub fn new<S: AsRef<str>>(symbols: &[S]) -> Self {
         Self {
-            symbol: symbol.to_uppercase(),
-            seq: AtomicU64::new(0),
+            symbols: symbols.iter().map(|s| s.as_ref().to_uppercase()).collect(),
+            seq: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Next synthetic sequence for `symbol`; `reset` restarts it at 0 (snapshot).
+    fn next_seq(&self, symbol: &str, reset: bool) -> u64 {
+        let mut seqs = self.seq.lock().unwrap();
+        let entry = seqs.entry(symbol.to_string()).or_insert(0);
+        if reset {
+            *entry = 0;
+        } else {
+            *entry += 1;
+        }
+        *entry
     }
 }
 
@@ -52,11 +66,13 @@ struct Subscribe<'a> {
 enum Incoming {
     #[serde(rename = "snapshot")]
     Snapshot {
+        product_id: String,
         bids: Vec<[String; 2]>,
         asks: Vec<[String; 2]>,
     },
     #[serde(rename = "l2update")]
     L2Update {
+        product_id: String,
         /// Exchange event time (RFC3339). Optional so an update without it still
         /// parses — we just report no latency for it.
         #[serde(default)]
@@ -76,8 +92,8 @@ impl Exchange for Coinbase {
         "coinbase"
     }
 
-    fn symbol(&self) -> &str {
-        &self.symbol
+    fn symbols(&self) -> &[String] {
+        &self.symbols
     }
 
     fn ws_url(&self) -> String {
@@ -91,7 +107,7 @@ impl Exchange for Coinbase {
         // `snapshot` + `l2update` messages — batch just throttles them to ~50ms.
         let sub = Subscribe {
             kind: "subscribe",
-            product_ids: vec![&self.symbol],
+            product_ids: self.symbols.iter().map(String::as_str).collect(),
             channels: vec!["level2_batch"],
         };
         vec![serde_json::to_string(&sub).expect("serialize subscribe")]
@@ -106,21 +122,32 @@ impl Exchange for Coinbase {
         Err(anyhow!("coinbase snapshot comes over the websocket"))
     }
 
-    fn parse_message(&self, raw: &str) -> Result<Option<BookEvent>> {
+    fn parse_message(&self, raw: &str) -> Result<Option<ParsedEvent>> {
         let msg: Incoming = match serde_json::from_str(raw) {
             Ok(m) => m,
             Err(_) => return Ok(None),
         };
         match msg {
-            Incoming::Snapshot { bids, asks } => {
-                self.seq.store(0, Ordering::SeqCst);
-                Ok(Some(BookEvent::Snapshot {
-                    bids: parse_levels(&bids)?,
-                    asks: parse_levels(&asks)?,
-                    sequence: 0,
+            Incoming::Snapshot {
+                product_id,
+                bids,
+                asks,
+            } => {
+                self.next_seq(&product_id, true);
+                Ok(Some(ParsedEvent {
+                    symbol: product_id,
+                    event: BookEvent::Snapshot {
+                        bids: parse_levels(&bids)?,
+                        asks: parse_levels(&asks)?,
+                        sequence: 0,
+                    },
                 }))
             }
-            Incoming::L2Update { time, changes } => {
+            Incoming::L2Update {
+                product_id,
+                time,
+                changes,
+            } => {
                 let mut bids = Vec::new();
                 let mut asks = Vec::new();
                 for [side, price, size] in &changes {
@@ -136,15 +163,18 @@ impl Exchange for Coinbase {
                         other => return Err(anyhow!("unknown side {other:?}")),
                     }
                 }
-                let n = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
+                let n = self.next_seq(&product_id, false);
                 let event_time_ms = time.as_deref().and_then(rfc3339_to_epoch_ms);
-                Ok(Some(BookEvent::Delta {
-                    bids,
-                    asks,
-                    first: n,
-                    last: n,
-                    event_time_ms,
-                    checksum: None,
+                Ok(Some(ParsedEvent {
+                    symbol: product_id,
+                    event: BookEvent::Delta {
+                        bids,
+                        asks,
+                        first: n,
+                        last: n,
+                        event_time_ms,
+                        checksum: None,
+                    },
                 }))
             }
             Incoming::Error { message } => {
@@ -161,14 +191,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn l2update_carries_event_time() {
-        let c = Coinbase::new("BTC-USD");
+    fn l2update_carries_event_time_and_symbol() {
+        let c = Coinbase::new(&["BTC-USD"]);
         let raw = r#"{"type":"l2update","product_id":"BTC-USD","time":"2019-08-14T20:42:27.265Z","changes":[["buy","61000.00","0.5"]]}"#;
-        let ev = c
+        let parsed = c
             .parse_message(raw)
             .unwrap()
             .expect("should parse an l2update");
-        match ev {
+        assert_eq!(parsed.symbol, "BTC-USD");
+        match parsed.event {
             BookEvent::Delta {
                 event_time_ms,
                 bids,
@@ -183,12 +214,33 @@ mod tests {
 
     #[test]
     fn l2update_without_time_has_no_event_time() {
-        let c = Coinbase::new("BTC-USD");
-        let raw = r#"{"type":"l2update","changes":[["sell","61001.00","1.0"]]}"#;
-        let ev = c.parse_message(raw).unwrap().expect("should parse");
-        match ev {
+        let c = Coinbase::new(&["BTC-USD"]);
+        let raw =
+            r#"{"type":"l2update","product_id":"BTC-USD","changes":[["sell","61001.00","1.0"]]}"#;
+        let parsed = c.parse_message(raw).unwrap().expect("should parse");
+        match parsed.event {
             BookEvent::Delta { event_time_ms, .. } => assert_eq!(event_time_ms, None),
             _ => panic!("expected a delta"),
         }
+    }
+
+    #[test]
+    fn per_symbol_sequences_are_independent() {
+        let c = Coinbase::new(&["BTC-USD", "ETH-USD"]);
+        let snap =
+            |p: &str| format!(r#"{{"type":"snapshot","product_id":"{p}","bids":[],"asks":[]}}"#);
+        let upd = |p: &str| {
+            format!(r#"{{"type":"l2update","product_id":"{p}","changes":[["buy","1","1"]]}}"#)
+        };
+        // Seed both, then interleave updates: each symbol counts from 1.
+        c.parse_message(&snap("BTC-USD")).unwrap();
+        c.parse_message(&snap("ETH-USD")).unwrap();
+        let first = |raw: &str| match c.parse_message(raw).unwrap().unwrap().event {
+            BookEvent::Delta { first, .. } => first,
+            _ => panic!("delta"),
+        };
+        assert_eq!(first(&upd("BTC-USD")), 1);
+        assert_eq!(first(&upd("ETH-USD")), 1); // independent, not 2
+        assert_eq!(first(&upd("BTC-USD")), 2);
     }
 }

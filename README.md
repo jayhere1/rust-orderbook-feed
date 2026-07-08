@@ -2,8 +2,9 @@
 
 A Rust WebSocket client that consumes a live crypto exchange feed (Binance,
 Coinbase, or Kraken public streams), parses order-book deltas, and maintains a
-correct in-memory order book with sequence/gap handling, CRC32 checksum
-validation (Kraken), automatic reconnect, and throughput + feed-latency metrics.
+correct in-memory order book — per symbol, several on one connection for
+Coinbase/Kraken — with sequence/gap handling, CRC32 checksum validation
+(Kraken), automatic reconnect, and throughput + feed-latency metrics.
 
 Built on `async-std` + `async-tungstenite` (rustls TLS), `surf` for the REST
 snapshot, `serde` for JSON, and `rust_decimal` for exact price/quantity math.
@@ -25,6 +26,10 @@ cargo run --release -- --exchange coinbase --symbol BTC-USD
 # Kraken BTC/USD (checksum-validated depth-10 book)
 cargo run --release -- --exchange kraken --symbol BTC/USD
 
+# Several symbols on one connection (Coinbase / Kraken)
+cargo run --release -- --exchange coinbase --symbol BTC-USD,ETH-USD
+cargo run --release -- --exchange kraken --symbol BTC/USD,ETH/USD
+
 # Ethereum on Binance, top-of-book only
 cargo run --release -- --exchange binance --symbol ETHUSDT --depth 1
 
@@ -32,9 +37,12 @@ cargo run --release -- --exchange binance --symbol ETHUSDT --depth 1
 RUST_LOG=debug cargo run
 ```
 
-CLI flags: `--exchange {binance|coinbase|kraken}`, `--symbol <SYMBOL>`,
+CLI flags: `--exchange {binance|coinbase|kraken}`, `--symbol <SYMBOL[,SYMBOL...]>`,
 `--depth <N>` (book levels printed per tick). Defaults: Binance / `BTCUSDT` /
-depth 5. Default symbols: `BTC-USD` (coinbase), `BTC/USD` (kraken).
+depth 5. Default symbols: `BTC-USD` (coinbase), `BTC/USD` (kraken). `--symbol`
+takes a comma-separated list for Coinbase/Kraken (one connection, one book +
+metrics line per symbol); Binance is single-symbol for now (combined streams are
+on the roadmap).
 
 Sample output (real, top-3 depth, Binance BTCUSDT):
 
@@ -133,7 +141,8 @@ Two layers:
 
 Natural next steps, roughly in order of value:
 
-- **Multiple symbols per process** — Binance combined streams; several Coinbase
-  `product_ids` / Kraken symbols on one subscription.
+- **Binance multi-symbol** — the one remaining gap: use the combined-stream
+  endpoint (`/stream?streams=...`) with a per-symbol REST-snapshot sync.
+  (Coinbase and Kraken already take a comma-separated `--symbol` list.)
 - **Persistence / fan-out** — expose top-of-book over a local socket or persist
   it for downstream consumers.

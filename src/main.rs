@@ -54,20 +54,38 @@ async fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let args = Args::parse();
-    let symbol = args
-        .symbol
-        .clone()
-        .unwrap_or_else(|| args.exchange.default_symbol().to_string());
+
+    // `--symbol` accepts a comma-separated list; default to the exchange's one.
+    let symbols: Vec<String> = match &args.symbol {
+        Some(s) => s
+            .split(',')
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty())
+            .collect(),
+        None => vec![args.exchange.default_symbol().to_string()],
+    };
+    if symbols.is_empty() {
+        anyhow::bail!("no symbols given");
+    }
 
     let exchange: Box<dyn Exchange> = match args.exchange {
-        ExchangeArg::Binance => Box::new(Binance::new(&symbol)),
-        ExchangeArg::Coinbase => Box::new(Coinbase::new(&symbol)),
-        ExchangeArg::Kraken => Box::new(Kraken::new(&symbol)),
+        ExchangeArg::Binance => {
+            if symbols.len() > 1 {
+                anyhow::bail!(
+                    "binance multi-symbol is not supported yet; pass a single --symbol \
+                     (coinbase and kraken accept a comma-separated list)"
+                );
+            }
+            Box::new(Binance::new(&symbols))
+        }
+        ExchangeArg::Coinbase => Box::new(Coinbase::new(&symbols)),
+        ExchangeArg::Kraken => Box::new(Kraken::new(&symbols)),
     };
 
     log::info!(
-        "starting {:?} feed for {symbol} (printing top {} levels)",
+        "starting {:?} feed for {} (printing top {} levels)",
         args.exchange,
+        symbols.join(","),
         args.depth
     );
 

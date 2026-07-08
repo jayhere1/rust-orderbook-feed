@@ -9,7 +9,7 @@
 
 use crate::exchanges::binance::Binance;
 use crate::exchanges::coinbase::Coinbase;
-use crate::feed::Exchange;
+use crate::feed::{Exchange, ParsedEvent};
 use crate::orderbook::{BookEvent, OrderBook};
 
 const BINANCE_SNAPSHOT: &str = include_str!("../tests/fixtures/binance_btcusdt_snapshot.json");
@@ -36,17 +36,21 @@ fn nonempty_lines(s: &str) -> impl Iterator<Item = &str> {
 
 #[test]
 fn binance_recorded_session_stays_contiguous() {
-    let binance = Binance::new("BTCUSDT");
+    let binance = Binance::new(&["BTCUSDT"]);
     let mut book = seed_binance();
 
     let mut applied = 0usize;
     let mut prev_id = book.last_update_id();
     for line in nonempty_lines(BINANCE_DELTAS) {
-        let Some(BookEvent::Delta {
-            bids,
-            asks,
-            first,
-            last,
+        let Some(ParsedEvent {
+            event:
+                BookEvent::Delta {
+                    bids,
+                    asks,
+                    first,
+                    last,
+                    ..
+                },
             ..
         }) = binance.parse_message(line).unwrap()
         else {
@@ -73,7 +77,7 @@ fn binance_recorded_session_stays_contiguous() {
 
 #[test]
 fn binance_dropped_frame_is_detected_as_gap() {
-    let binance = Binance::new("BTCUSDT");
+    let binance = Binance::new(&["BTCUSDT"]);
     let mut book = seed_binance();
 
     // Replay normally until the book is live (2 deltas applied), then drop the
@@ -83,11 +87,15 @@ fn binance_dropped_frame_is_detected_as_gap() {
     let mut dropped_one = false;
     let mut hit_gap = false;
     for line in nonempty_lines(BINANCE_DELTAS) {
-        let Some(BookEvent::Delta {
-            bids,
-            asks,
-            first,
-            last,
+        let Some(ParsedEvent {
+            event:
+                BookEvent::Delta {
+                    bids,
+                    asks,
+                    first,
+                    last,
+                    ..
+                },
             ..
         }) = binance.parse_message(line).unwrap()
         else {
@@ -116,16 +124,16 @@ fn binance_dropped_frame_is_detected_as_gap() {
 
 #[test]
 fn coinbase_recorded_session_stays_contiguous() {
-    let coinbase = Coinbase::new("BTC-USD");
+    let coinbase = Coinbase::new(&["BTC-USD"]);
     let mut book = OrderBook::new();
 
     let mut seeded = false;
     let mut applied = 0usize;
     for line in nonempty_lines(COINBASE_SESSION) {
-        let Some(ev) = coinbase.parse_message(line).unwrap() else {
+        let Some(parsed) = coinbase.parse_message(line).unwrap() else {
             continue;
         };
-        match ev {
+        match parsed.event {
             BookEvent::Snapshot {
                 bids,
                 asks,

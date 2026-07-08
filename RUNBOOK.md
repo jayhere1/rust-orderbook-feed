@@ -32,6 +32,10 @@ cargo run --release -- --exchange coinbase --symbol BTC-USD
 # Kraken BTC/USD (checksum-validated depth-10 book)
 cargo run --release -- --exchange kraken --symbol BTC/USD
 
+# Several symbols on one connection (Coinbase / Kraken)
+cargo run --release -- --exchange coinbase --symbol BTC-USD,ETH-USD
+cargo run --release -- --exchange kraken --symbol BTC/USD,ETH/USD
+
 # Top-of-book only, Ethereum on Binance
 cargo run --release -- --exchange binance --symbol ETHUSDT --depth 1
 
@@ -39,8 +43,10 @@ cargo run --release -- --exchange binance --symbol ETHUSDT --depth 1
 RUST_LOG=debug cargo run --release
 ```
 
-Flags: `--exchange {binance|coinbase|kraken}`, `--symbol <SYMBOL>`, `--depth <N>`.
-Log level via `RUST_LOG` (`error|warn|info|debug|trace`, default `info`).
+Flags: `--exchange {binance|coinbase|kraken}`, `--symbol <SYMBOL[,SYMBOL...]>`,
+`--depth <N>`. `--symbol` is comma-separated for Coinbase/Kraken (one connection,
+one book + metrics line per symbol); Binance is single-symbol for now. Log level
+via `RUST_LOG` (`error|warn|info|debug|trace`, default `info`).
 
 ## 4. Reading the output
 
@@ -100,9 +106,11 @@ Backoff resets to 0.5s after any session that stays healthy for >10s.
 ## 7. Symbol formats (gotcha)
 
 - Binance: concatenated, uppercase, no separator — `BTCUSDT`, `ETHUSDT`.
-  (Input is case-normalized automatically.)
-- Coinbase: base-quote with a dash — `BTC-USD`, `ETH-USD`.
-- Kraken: base/quote with a slash — `BTC/USD`, `ETH/USD`.
+  (Input is case-normalized automatically.) Single symbol only.
+- Coinbase: base-quote with a dash — `BTC-USD`, `ETH-USD`. Comma-separated list
+  allowed — `BTC-USD,ETH-USD`.
+- Kraken: base/quote with a slash — `BTC/USD`, `ETH/USD`. Comma-separated list
+  allowed — `BTC/USD,ETH/USD`.
 
 Using the wrong format for the chosen exchange is the most common startup error.
 
@@ -116,7 +124,11 @@ Using the wrong format for the chosen exchange is the most common startup error.
   on that feed cannot be detected from the payload. Integrity per feed: Binance
   via update-id contiguity, Kraken via the CRC32 checksum, Coinbase best-effort
   (synthetic counter only). (See §"How the book stays correct" in `README.md`.)
-- No persistence, no cross-run recovery, single symbol per process.
+- No persistence, no cross-run recovery.
+- Binance is single-symbol; Coinbase/Kraken take several symbols on one
+  connection (Binance combined streams are on the roadmap).
+- Resync granularity is whole-connection: a gap or checksum mismatch on any one
+  symbol drops and reconnects all books on that connection.
 
 ## 10. Verification status
 
@@ -125,17 +137,19 @@ Verified on macOS (Rust 1.95, edition 2021):
 - `cargo build` / `cargo build --release` — clean, no warnings.
 - `cargo clippy --all-targets` — clean.
 - `cargo fmt --check` — clean.
-- `cargo test` — 28/28 tests pass: unit tests (order book, latency aggregation,
-  RFC3339 parsing, per-exchange event-time extraction, CRC32, Kraken checksum)
-  plus replay + checksum integration tests over recorded real sessions (see §11).
+- `cargo test` — 29/29 tests pass: unit tests (order book, latency aggregation,
+  RFC3339 parsing, per-exchange event-time extraction, per-symbol sequencing,
+  CRC32, Kraken checksum) plus replay + checksum integration tests over recorded
+  real sessions (see §11).
 - Live smoke test, Binance `BTCUSDT` — snapshot seeded (buffered deltas
   replayed), then steady ~10 upd/s with a 0.01 spread and ~1000/1000 book;
   latency ~`lat 113/146 ms`.
-- Live smoke test, Coinbase `BTC-USD` — snapshot seeded, then steady ~17 upd/s
-  over the full book (~14k/28k levels); latency ~`lat 53/113 ms`.
-- Live smoke test, Kraken `BTC/USD` — snapshot seeded, then a steady stream at a
-  fixed 10/10 book with **0 checksum mismatches / 0 resyncs** (our CRC32 matched
-  Kraken's on every live update); latency ~`lat 14/62 ms` from the update
+- Live smoke test, Coinbase `BTC-USD,ETH-USD` — both books seeded and streaming
+  independently (BTC ~15k/27k levels, ETH ~5k/17k), each with its own metrics
+  line; latency ~`lat 45/110 ms`.
+- Live smoke test, Kraken `BTC/USD,ETH/USD` — both books at a fixed 10/10 with
+  **0 checksum mismatches / 0 resyncs** across ~1400 combined updates (per-symbol
+  precision + CRC32 correct on both); latency ~`lat 14/100 ms` from the update
   `timestamp`.
 
 Notes:
